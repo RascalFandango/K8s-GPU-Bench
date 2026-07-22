@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Generated Job manifests (submit.py writes these; regenerate, don't commit)
+jobs.yaml
+
+# Secrets and credentials — NEVER commit real values
+.env
+*.env
+kubeconfig
+kubeconfig-*
+*.kubeconfig
+.kube/
+
+# Editor / OS / tooling cruft
+.DS_Store
+*.swp
+.claude/
