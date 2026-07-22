@@ -1,0 +1,11 @@
+{"kind":"NodeList","items":[
+ {"metadata":{"name":"n1","labels":{"nvidia.com/gpu.product":"NVIDIA-GeForce-RTX-3090","nvidia.com/gpu.memory":"24576","nvidia.com/gpu.compute.major":"8","nvidia.com/gpu.compute.minor":"6","nvidia.com/cuda.driver.major":"550","nvidia.com/cuda.driver.minor":"54","kubernetes.io/arch":"amd64","topology.kubernetes.io/region":"us-west"}},
+  "spec":{},"status":{"allocatable":{"nvidia.com/gpu":"8","cpu":"64"},"conditions":[{"type":"Ready","status":"True"}]}},
+ {"metadata":{"name":"n2","labels":{"nvidia.com/gpu.product":"NVIDIA-GeForce-RTX-3090","nvidia.com/gpu.memory":"24576","kubernetes.io/arch":"amd64"}},
+  "spec":{"unschedulable":true},"status":{"allocatable":{"nvidia.com/gpu":"4"},"conditions":[{"type":"Ready","status":"True"}]}},
+ {"metadata":{"name":"n3","labels":{"nvidia.com/gpu.product":"Quadro-RTX-8000","nvidia.com/gpu.memory":"49152","nvidia.com/gpu.compute.major":"7","nvidia.com/gpu.compute.minor":"5","kubernetes.io/arch":"amd64"}},
+  "spec":{},"status":{"allocatable":{"nvidia.com/rtx-8000":"2"},"conditions":[{"type":"Ready","status":"True"}]}},
+ {"metadata":{"name":"n4","labels":{"nvidia.com/gpu.product":"NVIDIA-GH200-480GB","nvidia.com/gpu.memory":"97871","nvidia.com/gpu.compute.major":"9","nvidia.com/gpu.compute.minor":"0","kubernetes.io/arch":"arm64"}},
+  "spec":{"taints":[{"key":"nautilus.io/arm64","effect":"NoSchedule"}]},"status":{"allocatable":{"nvidia.com/gpu":"1"},"conditions":[{"type":"Ready","status":"True"}]}},
+ {"metadata":{"name":"cpu-only","labels":{}},"spec":{},"status":{"allocatable":{"cpu":"32"},"conditions":[{"type":"Ready","status":"True"}]}}
+]}
