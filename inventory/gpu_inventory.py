@@ -4,8 +4,12 @@
 Reads Kubernetes Node objects (as produced by ``kubectl get nodes -o json``) and
 emits a *flavor catalog*: for every distinct ``(GPU product, resource name)``
 pair on the cluster, how many nodes carry it, how many are schedulable right now,
-total and schedulable GPU counts, VRAM, compute capability, architecture, and the
-tolerations a Job needs in order to land on it.
+total and schedulable GPU counts, VRAM, compute capability, architecture, the
+tolerations a Job may safely carry, and whether the flavor sits behind a taint
+that needs admin authorization.
+
+Reading node labels is explicitly sanctioned by NRP -- the docs tell users to run
+``kubectl get nodes -L nvidia.com/gpu.product`` to choose hardware. See POLICY.md.
 
 INPUT (choose one; precedence is --in-cluster > --file > stdin):
   * stdin (default)  ``kubectl get nodes -o json | gpu_inventory.py``
@@ -30,6 +34,16 @@ allocation across the entire cluster, and the operator can only list pods in
 their own namespace. So this answers "what hardware is here and how do I request
 it," never "what is idle right now." NRP's own Grafana answers the latter. Do not
 mistake this output for a scheduler.
+
+    ============================================================
+    ==  Tolerations are an allowlist, not a free-for-all.     ==
+    ============================================================
+NRP policy (Special Use) authorizes users to tolerate only certain taints. We
+therefore auto-propose tolerations ONLY for the `nautilus.io/hardware` tier
+(arm64, large-gpu, ...). Reservation / system / issue / science-dmz taints are
+reported as `restricted` and NEVER auto-tolerated -- "tolerating the wrong taints
+... [leads] to policy violations." A restricted flavor is reachable only if an
+admin has authorized you for that taint.
 """
 
 import argparse
@@ -58,9 +72,37 @@ L_REGION = "topology.kubernetes.io/region"
 # nvidia.com/ prefix is a named flavor you request directly (§2.6).
 GENERIC_GPU = "nvidia.com/gpu"
 
-# Taints Kubernetes adds/removes on its own. They are churn, not a real
-# scheduling constraint, so we do not turn them into tolerations.
+# --- Taint authorization tiers (NRP "Special Use" policy; POLICY.md) ----------
+# node.kubernetes.io/* taints are automatic churn (not-ready, unreachable,
+# *-pressure) and are ignored. Of the nautilus.io/* taints, only the `hardware`
+# tier is broadly tolerable by any user. All other tiers are RESTRICTED: we
+# surface them but never auto-generate a toleration, because tolerating a taint
+# you are not authorized for is itself a policy violation.
 CHURN_TAINT_PREFIX = "node.kubernetes.io/"
+TOLERABLE_TAINT_KEYS = ("nautilus.io/hardware",)   # arm64, large-gpu, ...
+
+
+def classify_taint(taint):
+    """Bucket a taint into: churn | tolerable | <restricted-reason>.
+
+    Anything that is not churn and not explicitly tolerable is treated as
+    restricted (conservative), tagged with why, so the operator can decide
+    whether they hold the authorization to reach that node.
+    """
+    key = str(taint.get("key", ""))
+    if key.startswith(CHURN_TAINT_PREFIX):
+        return "churn"
+    if key in TOLERABLE_TAINT_KEYS:
+        return "tolerable"
+    if key.startswith("nautilus.io/reservation"):
+        return "reservation"     # only if you are in the approved group
+    if key.startswith("nautilus.io/system"):
+        return "system"          # never tolerate -- infrastructure nodes
+    if key.startswith("nautilus.io/issue"):
+        return "issue"           # never tolerate -- nodes with known problems
+    if key.startswith("nautilus.io/science-dmz"):
+        return "science-dmz"     # only if you need no public Internet
+    return "unknown"             # unrecognized -> be conservative, restrict
 
 
 # --- small helpers -----------------------------------------------------------
@@ -87,7 +129,7 @@ def gpu_resources(node):
 
     This is the load-bearing bit of §2.6: we do not look up a hardcoded model
     list, we read the allocatable map. ``nvidia.com/gpu`` is the generic pool;
-    any other ``nvidia.com/<name>`` (rtx-8000, a100, mig-1g.5gb, ...) is a
+    any other ``nvidia.com/<name>`` (rtx8000, a100, h100, mig-small, ...) is a
     special-request flavor that new hardware joins automatically.
     """
     alloc = (node.get("status") or {}).get("allocatable") or {}
@@ -112,14 +154,8 @@ def is_cordoned(node):
     return bool((node.get("spec") or {}).get("unschedulable", False))
 
 
-def real_taints(node):
-    """Taints minus the automatic not-ready/unreachable/*-pressure churn."""
-    kept = []
-    for taint in (node.get("spec") or {}).get("taints") or []:
-        if str(taint.get("key", "")).startswith(CHURN_TAINT_PREFIX):
-            continue
-        kept.append(taint)
-    return kept
+def node_taints(node):
+    return (node.get("spec") or {}).get("taints") or []
 
 
 def taint_to_toleration(taint):
@@ -147,7 +183,7 @@ def node_facts(node):
         "region": lb.get(L_REGION, ""),
         "ready": is_ready(node),
         "cordoned": is_cordoned(node),
-        "taints": real_taints(node),
+        "taints": node_taints(node),
         "resources": gpu_resources(node),
     }
 
@@ -173,6 +209,7 @@ def _new_flavor(product, resource):
         "_nodes": set(),
         "_sched_nodes": set(),
         "_tols": {},
+        "_restricted": {},
     }
 
 
@@ -197,10 +234,21 @@ def build_catalog(nodes):
             for key in _FILLABLE:
                 if not fl[key] and f[key]:
                     fl[key] = f[key]
+            # Classify taints: auto-tolerate only the `hardware` tier; record
+            # everything else as restricted (needs admin authorization).
             for taint in f["taints"]:
-                tol = taint_to_toleration(taint)
-                fl["_tols"][(tol.get("key"), tol.get("value"),
-                             tol.get("effect"))] = tol
+                tier = classify_taint(taint)
+                if tier == "churn":
+                    continue
+                if tier == "tolerable":
+                    tol = taint_to_toleration(taint)
+                    fl["_tols"][(tol.get("key"), tol.get("value"),
+                                 tol.get("effect"))] = tol
+                else:
+                    entry = {"key": taint.get("key"), "value": taint.get("value"),
+                             "effect": taint.get("effect"), "reason": tier}
+                    fl["_restricted"][(entry["key"], entry["value"],
+                                       entry["effect"])] = entry
 
     catalog = [_finalize(fl) for fl in flavors.values()]
     catalog.sort(key=lambda fl: (fl["product"], fl["resource"]))
@@ -227,7 +275,12 @@ def _finalize(fl):
         "driver": fl["driver"],
         "mig_capable": fl["mig_capable"],
         "region": fl["region"],
+        # Only `hardware`-tier tolerations end up here -- safe to emit in a Job.
         "tolerations": list(fl["_tols"].values()),
+        # True when some node of this flavor sits behind a taint you may not
+        # tolerate without admin authorization. Do not auto-schedule onto these.
+        "restricted": bool(fl["_restricted"]),
+        "restricted_taints": list(fl["_restricted"].values()),
         "node_names": sorted(fl["_nodes"]),
     }
 
@@ -305,6 +358,12 @@ def _tols_cell(tols):
     return ", ".join(_tol_str(t) for t in tols) if tols else "—"
 
 
+def _restricted_cell(restricted):
+    # e.g. "reservation (nautilus.io/reservation=cogrob:NoSchedule)"
+    return (", ".join(f"{r['reason']} ({_tol_str(r)})" for r in restricted)
+            if restricted else "—")
+
+
 def fmt_md(catalog):
     flavors = catalog["flavors"]
     node_names = set()
@@ -316,17 +375,18 @@ def fmt_md(catalog):
         f"_Generated {catalog['generated']}_",
         "",
         f"**{len(flavors)} flavors across {len(node_names)} GPU nodes.** "
-        "Counts are allocatable capacity, not free capacity — see the note below.",
+        "Counts are allocatable capacity, not free capacity — see the notes "
+        "below.",
         "",
         "| Product | Resource | Selector? | Nodes (sched/total) | "
-        "GPUs (sched/alloc) | VRAM GiB | CC | Arch | Driver | MIG | Region | "
-        "Tolerations |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "GPUs (sched/alloc) | VRAM GiB | CC | Arch | Driver | Tolerations | "
+        "Restricted |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for fl in flavors:
         lines.append("| {product} | `{resource}` | {sel} | {sn}/{tn} | "
-                      "{sg}/{ag} | {vram} | {cc} | {arch} | {drv} | {mig} | "
-                      "{region} | {tols} |".format(
+                      "{sg}/{ag} | {vram} | {cc} | {arch} | {drv} | {tols} | "
+                      "{restr} |".format(
                           product=fl["product"] or "—",
                           resource=fl["resource"],
                           sel="yes" if fl["needs_node_selector"] else "no",
@@ -336,9 +396,8 @@ def fmt_md(catalog):
                           cc=fl["compute_capability"] or "—",
                           arch=fl["arch"] or "—",
                           drv=fl["driver"] or "—",
-                          mig=fl["mig_capable"] or "—",
-                          region=fl["region"] or "—",
-                          tols=_tols_cell(fl["tolerations"])))
+                          tols=_tols_cell(fl["tolerations"]),
+                          restr=_restricted_cell(fl["restricted_taints"])))
     lines += [
         "",
         "> **allocatable ≠ free.** This lists GPUs that *exist* and whether "
@@ -346,6 +405,12 @@ def fmt_md(catalog):
         "Free capacity needs cluster-wide pod allocation, which a "
         "namespace-scoped operator cannot see. Check NRP's Grafana for "
         "utilization.",
+        ">",
+        "> **Restricted flavors** sit behind a taint you may not tolerate "
+        "without admin authorization (reservation / system / issue / "
+        "science-dmz). They are shown for completeness; do not schedule onto "
+        "them unless an admin has authorized you. Only `nautilus.io/hardware` "
+        "taints are auto-tolerated.",
         "",
     ]
     return "\n".join(lines)
@@ -358,7 +423,7 @@ def fmt_csv(catalog):
         "product", "resource", "needs_node_selector", "nodes",
         "schedulable_nodes", "gpus_allocatable", "gpus_schedulable", "vram_gib",
         "compute_capability", "arch", "driver", "mig_capable", "region",
-        "tolerations", "node_names",
+        "tolerations", "restricted", "restricted_taints", "node_names",
     ])
     for fl in catalog["flavors"]:
         writer.writerow([
@@ -367,6 +432,9 @@ def fmt_csv(catalog):
             fl["gpus_schedulable"], fl["vram_gib"], fl["compute_capability"],
             fl["arch"], fl["driver"], fl["mig_capable"], fl["region"],
             ";".join(_tol_str(t) for t in fl["tolerations"]),
+            fl["restricted"],
+            ";".join(f"{r['reason']}:{_tol_str(r)}"
+                     for r in fl["restricted_taints"]),
             ";".join(fl["node_names"]),
         ])
     return buf.getvalue()

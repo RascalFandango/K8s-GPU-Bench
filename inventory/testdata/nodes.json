@@ -4,8 +4,10 @@
  {"metadata":{"name":"n2","labels":{"nvidia.com/gpu.product":"NVIDIA-GeForce-RTX-3090","nvidia.com/gpu.memory":"24576","kubernetes.io/arch":"amd64"}},
   "spec":{"unschedulable":true},"status":{"allocatable":{"nvidia.com/gpu":"4"},"conditions":[{"type":"Ready","status":"True"}]}},
  {"metadata":{"name":"n3","labels":{"nvidia.com/gpu.product":"Quadro-RTX-8000","nvidia.com/gpu.memory":"49152","nvidia.com/gpu.compute.major":"7","nvidia.com/gpu.compute.minor":"5","kubernetes.io/arch":"amd64"}},
-  "spec":{},"status":{"allocatable":{"nvidia.com/rtx-8000":"2"},"conditions":[{"type":"Ready","status":"True"}]}},
+  "spec":{},"status":{"allocatable":{"nvidia.com/rtx8000":"2"},"conditions":[{"type":"Ready","status":"True"}]}},
  {"metadata":{"name":"n4","labels":{"nvidia.com/gpu.product":"NVIDIA-GH200-480GB","nvidia.com/gpu.memory":"97871","nvidia.com/gpu.compute.major":"9","nvidia.com/gpu.compute.minor":"0","kubernetes.io/arch":"arm64"}},
-  "spec":{"taints":[{"key":"nautilus.io/arm64","effect":"NoSchedule"}]},"status":{"allocatable":{"nvidia.com/gpu":"1"},"conditions":[{"type":"Ready","status":"True"}]}},
+  "spec":{"taints":[{"key":"nautilus.io/hardware","value":"arm64","effect":"NoSchedule"}]},"status":{"allocatable":{"nvidia.com/gpu":"1"},"conditions":[{"type":"Ready","status":"True"}]}},
+ {"metadata":{"name":"n5","labels":{"nvidia.com/gpu.product":"NVIDIA-RTX-A6000","nvidia.com/gpu.memory":"49140","nvidia.com/gpu.compute.major":"8","nvidia.com/gpu.compute.minor":"6","kubernetes.io/arch":"amd64"}},
+  "spec":{"taints":[{"key":"nautilus.io/reservation","value":"cogrob","effect":"NoSchedule"}]},"status":{"allocatable":{"nvidia.com/rtxa6000":"2"},"conditions":[{"type":"Ready","status":"True"}]}},
  {"metadata":{"name":"cpu-only","labels":{}},"spec":{},"status":{"allocatable":{"cpu":"32"},"conditions":[{"type":"Ready","status":"True"}]}}
 ]}
