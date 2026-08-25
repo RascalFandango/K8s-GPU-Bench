@@ -1,0 +1,87 @@
+# Pushgateway: the durable half of the two-path design (§2.1). Benchmark Jobs are
+# ephemeral -- a pod that lives twelve minutes might be scraped twice or zero
+# times, and its series vanish when it is deleted. So finished results are PUSHED
+# here, and Prometheus pulls them from a stable address. This is the canonical
+# Pushgateway use case: ephemeral batch jobs, exactly like an sbatch job writing
+# its result somewhere durable before the allocation is torn down.
+#
+# Grouping key is (product, node) (§2.3). Pushgateway keeps the LAST push per
+# grouping key forever, so re-running a flavor overwrites its row -- bounded
+# cardinality, always current. Putting a timestamp or run ID in the key would
+# grow unbounded and slowly kill the dashboard.
+#
+# To evict a stale flavor by hand:
+#   curl -X DELETE http://pushgateway:9091/metrics/job/nrp_gpu_bench/product/<P>/node/<N>
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pushgateway-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: rook-ceph-block   # verify: kubectl get storageclass
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pushgateway
+  labels:
+    app: pushgateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pushgateway
+  template:
+    metadata:
+      labels:
+        app: pushgateway
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+        - name: pushgateway
+          image: prom/pushgateway:v1.10.0
+          args:
+            # Persist to the PVC, or a pod restart loses every benchmark result
+            # ever pushed (§2 Phase 2). --persistence.interval bounds how much a
+            # crash can lose.
+            - --persistence.file=/data/pushgateway.store
+            - --persistence.interval=1m
+          ports:
+            - containerPort: 9091
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pushgateway-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pushgateway
+  labels:
+    app: pushgateway
+spec:
+  selector:
+    app: pushgateway
+  ports:
+    - name: http
+      port: 9091
+      targetPort: 9091

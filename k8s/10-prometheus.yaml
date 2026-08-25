@@ -1,0 +1,171 @@
+# Prometheus: scrapes live GPU telemetry from benchmark pods and pulls durable
+# results from the Pushgateway. All objects here are namespace-scoped -- there is
+# NOT a single ClusterRole, because this project only has namespace-admin rights
+# (BUILD-SPEC §2.5). Pod discovery is therefore restricted to our own namespace.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+---
+# Role, not ClusterRole. This is the SLURM account/QoS analogue: a bounded set of
+# verbs on a few resource types, and only inside this one namespace. A ClusterRole
+# would fail to apply here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      # --- Durable results path -------------------------------------------
+      # Benchmark Jobs push TFLOPS/GB-s/tokens-per-sec here when they finish.
+      # honor_labels: true is load-bearing (§2.2): without it Prometheus
+      # overwrites the pushed `product` and `node` labels with its own job/
+      # instance labels, and every GPU flavor collapses into one series. The
+      # failure is silent -- the dashboard just shows identical numbers.
+      - job_name: pushgateway
+        honor_labels: true
+        static_configs:
+          - targets: ["pushgateway:9091"]
+
+      # --- Live telemetry path --------------------------------------------
+      # Short-lived benchmark pods expose NVML gauges on :9400. 5s interval,
+      # not the 15s default: a pod may live only minutes and the default can
+      # miss the run entirely (§2.1). own_namespace: true is the RBAC-safe
+      # discovery scope -- it needs only the namespaced Role above, no
+      # ClusterRole (§2.5). If an older Prometheus rejects it, fall back to
+      # `names: ["<your-namespace>"]`.
+      - job_name: gpu-bench-pods
+        scrape_interval: 5s
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              own_namespace: true
+        relabel_configs:
+          # Only scrape pods that opted in via annotation.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          # Rewrite the scrape address to the annotated metrics port.
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          # Carry the pod's GPU product and node onto every sample so live
+          # telemetry lines up with pushed results by (product, node).
+          - source_labels: [__meta_kubernetes_pod_label_gpu_product]
+            target_label: product
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # rook-ceph-block is an assumption (§5.5). Verify: kubectl get storageclass
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: a single RWO PVC cannot attach to an old and a
+  # new pod at once during a rollover.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534        # nobody, the prom/prometheus default user
+        fsGroup: 65534          # makes the PVC writable by that user
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.54.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # 365d: this is a longitudinal fleet record; short retention
+            # defeats the purpose (§2 Phase 2).
+            - --storage.tsdb.retention.time=365d
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 3Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: prometheus-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090

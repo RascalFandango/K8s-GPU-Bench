@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Uncomment and set to your NRP namespace. Everything here is namespace-scoped,
+# so nothing works cross-namespace anyway -- this just stamps the namespace onto
+# every object so you don't have to pass -n on every kubectl command.
+# namespace: your-namespace-here
+
+resources:
+  - 10-prometheus.yaml
+  - 20-pushgateway.yaml
+  - 30-grafana.yaml
+
+# The dashboard JSON is embedded as a ConfigMap. It lives at k8s/dashboards/ --
+# inside the kustomization root -- so plain `kubectl apply -k k8s/` works with no
+# --load-restrictor flag. (kustomize refuses to embed files above its own root;
+# keeping it under k8s/ sidesteps that. The dir still groups it as a distinct
+# artifact, and Phase 6 edits this same file.)
+configMapGenerator:
+  - name: grafana-dashboards
+    files:
+      - gpu-comparison.json=dashboards/gpu-comparison.json
+
+# The Grafana admin password. CHANGE-ME is a deliberate placeholder -- never
+# commit a real credential (§ Conventions). Override before applying, e.g.:
+#   kubectl create secret generic grafana-admin \
+#     --from-literal=admin-password='...' --dry-run=client -o yaml | kubectl apply -f -
+secretGenerator:
+  - name: grafana-admin
+    literals:
+      - admin-password=CHANGE-ME
+
+# Without this, kustomize appends a content hash to generated ConfigMap/Secret
+# names (grafana-dashboards-abc123). The Deployment references them by their
+# plain names, so the hash suffix would break the volume mounts.
+generatorOptions:
+  disableNameSuffixHash: true

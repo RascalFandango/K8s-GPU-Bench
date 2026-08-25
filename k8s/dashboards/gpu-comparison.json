@@ -1,0 +1,10 @@
+{
+  "__comment": "PLACEHOLDER. Replaced by the real 9-panel dashboard in Phase 6. Present now only so kustomize's configMapGenerator has a file to embed.",
+  "title": "GPU Comparison (placeholder)",
+  "uid": "nrp-gpu-comparison",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": []
+}
