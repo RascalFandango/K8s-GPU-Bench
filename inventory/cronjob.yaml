@@ -1,0 +1,119 @@
+# =============================================================================
+#  READ THIS FIRST -- the RBAC trap.
+# =============================================================================
+#  YOU can run `kubectl get nodes` because NRP bound your *user identity* to a
+#  cluster-wide read ClusterRole. This CronJob does NOT run as you -- it runs as
+#  the `gpu-inventory` *ServiceAccount* in your namespace, a different identity.
+#  That ServiceAccount almost certainly CANNOT list nodes.
+#
+#  Nodes are cluster-scoped, so the only thing that grants "list nodes" is a
+#  ClusterRole + ClusterRoleBinding -- which a namespace-scoped project may NOT
+#  create (see CLAUDE.md §2.5). There is therefore NO in-namespace RBAC you can
+#  write that makes this work. By default the dump step below will 403. That is
+#  expected; the failure is the lesson.
+#
+#  Verify the ServiceAccount's access before relying on this (replace <ns>):
+#      kubectl auth can-i list nodes \
+#        --as=system:serviceaccount:<ns>:gpu-inventory
+#  "no" means pick one of the three paths below.
+#
+#  PATH A -- ask an admin for a ClusterRoleBinding for this ServiceAccount.
+#     Out of your control and often declined; nothing to do here if granted.
+#
+#  PATH B -- mount YOUR kubeconfig as a Secret (uncomment the marked blocks).
+#     Creates a real tradeoff: it places a credential inside the namespace.
+#     Use a short-lived / least-privilege kubeconfig, and rotate it.
+#         kubectl create secret generic gpu-inventory-kubeconfig \
+#           --from-file=config=/path/to/kubeconfig
+#
+#  PATH C -- (recommended) don't run it in-cluster at all. A laptop crontab
+#     uses your own node-read creds and sidesteps the whole problem:
+#         0 6 * * 1  kubectl get nodes -o json | \
+#           /path/to/inventory/gpu_inventory.py --format md -o ~/gpu-catalog.md
+#
+#  This CronJob runs the scraper from a ConfigMap mount. Create/refresh that
+#  ConfigMap from the source file (single source of truth, no drift):
+#      kubectl create configmap gpu-inventory-script \
+#        --from-file=gpu_inventory.py=inventory/gpu_inventory.py \
+#        --dry-run=client -o yaml | kubectl apply -f -
+# =============================================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-inventory
+  labels:
+    app: nrp-gpu-bench
+# NOTE: intentionally NO Role/RoleBinding here. A namespaced Role cannot grant
+# access to cluster-scoped `nodes`, and a ClusterRole is forbidden (§2.5). See
+# the header for how this ServiceAccount actually gets node-read access.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gpu-inventory
+  labels:
+    app: nrp-gpu-bench
+spec:
+  schedule: "0 6 * * 1"          # weekly, Mondays 06:00 (cluster time)
+  concurrencyPolicy: Forbid      # never overlap a slow run with the next tick
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 604800   # clean finished Jobs after a week
+      template:
+        metadata:
+          labels:
+            app: nrp-gpu-bench
+        spec:
+          serviceAccountName: gpu-inventory
+          restartPolicy: Never
+          # Dump node JSON with kubectl (uses the ServiceAccount's in-cluster
+          # config by default -- this is the step that 403s without node-read).
+          initContainers:
+            - name: dump-nodes
+              image: bitnami/kubectl:1.30    # verify availability; swap if needed
+              command: ["sh", "-c"]
+              args: ["kubectl get nodes -o json > /work/nodes.json"]
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+              # --- PATH B: kubeconfig fallback (uncomment to use your creds) ---
+              # env:
+              #   - name: KUBECONFIG
+              #     value: /kube/config
+              # volumeMounts:  (merge with the mount above)
+              #   - name: kubeconfig
+              #     mountPath: /kube
+              #     readOnly: true
+          # Run our stdlib-only scraper against the dumped JSON. Emits the
+          # catalog to stdout, so `kubectl logs` on the Job shows it.
+          containers:
+            - name: scrape
+              image: python:3.12-slim
+              command: ["python", "/script/gpu_inventory.py",
+                        "--file", "/work/nodes.json", "--format", "md"]
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                - name: script
+                  mountPath: /script
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+          volumes:
+            - name: work
+              emptyDir: {}
+            - name: script
+              configMap:
+                name: gpu-inventory-script
+            # --- PATH B: kubeconfig fallback volume (uncomment with env above) ---
+            # - name: kubeconfig
+            #   secret:
+            #     secretName: gpu-inventory-kubeconfig
