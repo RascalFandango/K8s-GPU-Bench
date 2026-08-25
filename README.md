@@ -17,6 +17,10 @@ question theirs doesn't: *cross-flavor comparison with durable results.*
 > [CLAUDE.md](CLAUDE.md) for the encoded constraints. Re-verify against
 > <https://nrp.ai/documentation/> before trusting anything policy-related.
 
+> **New here?** The [Deployment & Usage Guide](GUIDE.md) is a full,
+> copy-paste, step-by-step walkthrough — deploy the stack, build the image, and
+> run benchmarks tier by tier — plus a portability note on what's NRP-specific.
+
 ## The two-path design
 
 Benchmark Jobs are ephemeral — a pod that lives twelve minutes might be scraped
