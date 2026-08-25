@@ -14,6 +14,9 @@ data:
     datasources:
       - name: Prometheus
         type: prometheus
+        # Fixed uid so the provisioned dashboard can reference this datasource
+        # stably (dashboards/gpu-comparison.json uses uid "prometheus").
+        uid: prometheus
         access: proxy
         url: http://prometheus:9090
         isDefault: true
